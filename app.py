@@ -7,7 +7,7 @@ from PIL import Image
 import io
 
 # --- 1. CONFIGURATION ---
-BASE_DIR = r"W:\Z_CODE\BeerApp"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, "beer_tracker.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 TASTER_DIR = os.path.join(BASE_DIR, "assets", "tasters")
