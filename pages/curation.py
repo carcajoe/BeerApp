@@ -13,6 +13,65 @@ def get_connection():
     conn.execute("PRAGMA journal_mode=WAL;") 
     return conn
 
+# --- BREWERY EDITING MODULE ---
+
+@st.dialog("Manage Breweries", width="large")
+def edit_breweries_dialog():
+    with get_connection() as conn:
+        # Load existing breweries
+        existing_breweries = pd.read_sql("SELECT brewery_id, brewery_name FROM breweries ORDER BY brewery_name", conn)
+        # Load countries
+        try:
+            countries_df = pd.read_sql("SELECT country_code, country_name FROM countries ORDER BY country_name", conn)
+        except:
+            countries_df = pd.DataFrame([["US", "United States"], ["HU", "Hungary"]], columns=["country_code", "country_name"])
+    
+    mode = st.radio("Action", ["Edit Existing", "Add New"], horizontal=True)
+    init = {"name": "", "group": "", "city": "", "country_code": "US", "notes": ""}
+    sel_id = None
+
+    if mode == "Edit Existing":
+        choice = st.selectbox("Select Brewery", options=existing_breweries['brewery_name'].tolist())
+        if choice:
+            sel_id = existing_breweries[existing_breweries['brewery_name'] == choice]['brewery_id'].values[0]
+            with get_connection() as conn:
+                conn.row_factory = sqlite3.Row # This prevents the "tuple indices" error
+                b = conn.execute("SELECT * FROM breweries WHERE brewery_id = ?", (int(sel_id),)).fetchone()
+                if b:
+                    init = {
+                        "name": b['brewery_name'] or "",
+                        "group": b['group_name'] or "",
+                        "city": b['city'] or "",
+                        "country_code": b['country_code'] or "US",
+                        "notes": b['notes'] or ""
+                    }
+
+    new_name = st.text_input("Brewery Name", value=init["name"])
+    c1, c2 = st.columns(2)
+    new_group = c1.text_input("Group Name", value=init["group"])
+    new_city = c2.text_input("City", value=init["city"])
+    
+    c_list = countries_df['country_name'].tolist()
+    c_idx = 0
+    if init["country_code"] in countries_df['country_code'].values:
+        c_idx = countries_df[countries_df['country_code'] == init["country_code"]].index[0]
+        
+    new_c_name = st.selectbox("Country", options=c_list, index=int(c_idx))
+    new_c_code = countries_df[countries_df['country_name'] == new_c_name]['country_code'].values[0]
+    new_notes = st.text_area("Notes", value=init["notes"])
+
+    if st.button("Save Brewery", use_container_width=True):
+        with get_connection() as conn:
+            if mode == "Edit Existing":
+                conn.execute("UPDATE breweries SET brewery_name=?, group_name=?, city=?, country_code=?, notes=? WHERE brewery_id=?", 
+                             (new_name, new_group, new_city, new_c_code, new_notes, int(sel_id)))
+            else:
+                conn.execute("INSERT INTO breweries (brewery_name, group_name, city, country_code, notes) VALUES (?, ?, ?, ?, ?)", 
+                             (new_name, new_group, new_city, new_c_code, new_notes))
+            conn.commit()
+        st.success("Brewery Updated!")
+        st.rerun()
+
 # --- DIALOG: CREATE NEW EVENT ---
 @st.dialog("Close current and Open New Event")
 def open_new_event_dialog():
@@ -42,10 +101,6 @@ def open_new_event_dialog():
         else:
             st.error("Please provide a title for the event.")
 
-# Placeholder for brewery dialog if not defined elsewhere
-def edit_breweries_dialog():
-    st.warning("Brewery management dialog function needed.")
-
 # --- PAGE LOGIC ---
 st.header("🛠️ Admin Curation")
 
@@ -53,7 +108,7 @@ st.header("🛠️ Admin Curation")
 col_act1, col_act2 = st.columns(2)
 
 if col_act1.button("🏭 Manage Breweries", use_container_width=True):
-    edit_breweries_dialog()
+    edit_breweries_dialog() # This will now point to the correct function at the top
     
 if col_act2.button("🆕 New Event", use_container_width=True, type="primary"):
     open_new_event_dialog()
