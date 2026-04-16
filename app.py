@@ -35,20 +35,46 @@ if st.session_state.current_taster is None:
     st.title("🍻 Beer Tracker Elite v2")
     
     with get_connection() as conn:
-        tasters_df = pd.read_sql("SELECT id, name, is_admin FROM tasters", conn)
+        # SQL logic: 
+        # 1. Join tasters with ratings to count event participation
+        # 2. Group by taster ID
+        # 3. HAVING count > 0 removes 'blank/empty' tasters who haven't participated
+        # 4. ORDER BY participation DESC puts the most active users at the top
+        query = """
+            SELECT 
+                t.id, 
+                t.name, 
+                t.is_admin, 
+                COUNT(DISTINCT SUBSTR(r.beer_key, 1, INSTR(r.beer_key, '-') - 1)) as session_count
+            FROM tasters t
+            JOIN ratings r ON t.id = r.taster_id
+            GROUP BY t.id
+            HAVING session_count > 0
+            ORDER BY session_count DESC, t.name ASC
+        """
+        tasters_df = pd.read_sql(query, conn)
+        
         last_ev = conn.execute("SELECT MAX(tasting_no) FROM events").fetchone()
         latest_session = last_ev[0] if last_ev and last_ev[0] else 1
     
     st.markdown("### Who are you?")
-    name = st.selectbox("Select your profile:", [""] + sorted(tasters_df['name'].tolist()))
+    
+    # Generate labels like "Name (12 sessions)" for better UX
+    taster_options = tasters_df.apply(lambda x: f"{x['name']} ({x['session_count']} sessions)", axis=1).tolist()
+    name_to_id_map = dict(zip(taster_options, tasters_df['id']))
+    name_to_admin_map = dict(zip(taster_options, tasters_df['is_admin']))
+
+    selected_label = st.selectbox("Select your profile:", [""] + taster_options)
     
     if st.button("Enter Journey", use_container_width=True, type="primary"):
-        if name:
-            user = tasters_df[tasters_df['name'] == name].iloc[0]
+        if selected_label:
+            # Extract the original name from the label (everything before the first " (")
+            original_name = selected_label.split(" (")[0]
+            
             st.session_state.update({
-                'current_taster': name,
-                'taster_id': int(user['id']),
-                'is_admin': bool(user['is_admin']),
+                'current_taster': original_name,
+                'taster_id': int(name_to_id_map[selected_label]),
+                'is_admin': bool(name_to_admin_map[selected_label]),
                 'current_tasting': latest_session
             })
             st.rerun()
