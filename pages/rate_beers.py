@@ -31,7 +31,7 @@ st.info(f"Voting as: **{st.session_state.current_taster}**")
 
 # --- 3. LOAD SESSION BEERS ---
 with get_connection() as conn:
-    beers = pd.read_sql("SELECT * FROM beers WHERE beer_key LIKE ?", conn, params=(f"{curr_tasting}-%",))
+    beers = pd.read_sql("SELECT * FROM beers WHERE beer_id LIKE ?", conn, params=(f"{curr_tasting}-%",))
 
 if beers.empty: 
     st.warning(f"No beers found for session #{curr_tasting}.")
@@ -54,7 +54,7 @@ else:
 
     # --- RANKING LOGIC ---
     if 'rankings' not in st.session_state: 
-        st.session_state.rankings = {b['beer_key']: None for _, b in beers.iterrows()}
+        st.session_state.rankings = {b['beer_id']: None for _, b in beers.iterrows()}
     
     used_ranks = [v for v in st.session_state.rankings.values() if v is not None]
     
@@ -63,7 +63,7 @@ else:
         st.markdown("---")
         col1, col2 = st.columns([1, 2])
         
-        img_path = os.path.join(UPLOAD_DIR, f"{b['beer_key']}.jpg")
+        img_path = os.path.join(UPLOAD_DIR, f"{b['beer_id']}.jpg")
         if os.path.exists(img_path): 
             col1.image(img_path, width=150)
         else:
@@ -79,24 +79,24 @@ else:
             elif not pd.isna(m_name) and str(m_name).strip() != "":
                 name_display = m_name
             else:
-                name_display = f"Beer {b['beer_key']}"
+                name_display = f"Beer {b['beer_id']}"
 
             st.subheader(name_display)
-            st.caption(f"ID: {b['beer_key']}")
+            st.caption(f"ID: {b['beer_id']}")
             
-            curr = st.session_state.rankings[b['beer_key']]
+            curr = st.session_state.rankings[b['beer_id']]
             # Only show ranks that aren't taken, unless it's the rank currently assigned to THIS beer
             avail = [i for i in range(1, len(beers)+1) if i not in used_ranks or i == curr]
             
             choice = st.selectbox(
-                f"Rank for {b['beer_key']}", 
+                f"Rank for {b['beer_id']}", 
                 options=["-"] + sorted(avail), 
                 index=0 if curr is None else sorted(avail).index(curr) + 1,
-                key=f"sel_{b['beer_key']}"
+                key=f"sel_{b['beer_id']}"
             )
             
-            if choice != "-" and st.session_state.rankings[b['beer_key']] != choice:
-                st.session_state.rankings[b['beer_key']] = choice
+            if choice != "-" and st.session_state.rankings[b['beer_id']] != choice:
+                st.session_state.rankings[b['beer_id']] = choice
                 st.rerun()
 
     # --- 4. SUBMISSION ---
