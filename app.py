@@ -16,30 +16,26 @@ def get_connection():
     try: yield conn
     finally: conn.close()
 
-# --- DYNAMIC CALIBRATION (Pillar Logic) ---
+# --- DYNAMIC CALIBRATION ---
 def update_benchmarks():
-    """Calculates 20/80 percentile benchmarks using the correct table columns."""
     with get_connection() as conn:
-        # 1. XP (Sessions per taster)
         xp_df = pd.read_sql("""
             SELECT taster_id, COUNT(DISTINCT SUBSTR(beer_key, 1, INSTR(beer_key, '-')-1)) as count 
             FROM ratings GROUP BY taster_id
         """, conn)
         
-        # 2. Event Metrics
-        # JOINING b.beer_id (from beers table) to r.beer_key (from ratings table)
         event_df = pd.read_sql("""
             SELECT 
-                SUBSTR(r.beer_key, 1, INSTR(r.beer_key, '-')-1) as eid,
-                COUNT(DISTINCT r.beer_key) as beer_count,
+                SUBSTR(m.beer_event_position, 1, INSTR(m.beer_event_position, '-')-1) as eid,
+                COUNT(DISTINCT m.beer_event_position) as beer_count,
                 COUNT(DISTINCT r.taster_id) as voter_count,
                 AVG(b.untappd_score) / 5.0 as avg_quality
             FROM beers b
-            JOIN ratings r ON b.beer_id = r.beer_key
+            JOIN beer_event_mapping m ON b.beer_id = m.beer_id
+            JOIN ratings r ON m.beer_event_position = r.beer_key
             GROUP BY eid
         """, conn)
 
-    # Calculate Quintiles
     st.session_state['benchmarks'] = {
         "xp": np.percentile(xp_df['count'], [20, 80]) if not xp_df.empty else [2, 10],
         "strength": np.percentile(event_df['beer_count'], [20, 80]) if not event_df.empty else [8, 25],
@@ -57,21 +53,29 @@ if 'current_taster' not in st.session_state:
         'benchmarks': None
     })
 
+# --- REUSABLE HEADER FUNCTION ---
+def render_branded_header(image_name):
+    # Use 5 columns to create a narrower middle slot for the 720px image 
+    # to prevent it from looking "small" due to column stretching
+    _, _, col_mid, _, _ = st.columns([1, 1, 4, 1, 1])
+    with col_mid:
+        st.image(os.path.join(BASE_DIR, image_name), width=720)
+
 # --- LOGIN SCREEN ---
 if st.session_state.current_taster is None:
-    st.set_page_config(page_title="Beer Tracker Login", page_icon="🍺")
-    st.image(os.path.join(BASE_DIR, "OUT.jpg"), width=720)
+    st.set_page_config(page_title="Beer Tracker Login", page_icon="🍺", layout="wide")
+    
+    render_branded_header("OUT.jpg")
+    
     st.title("🍻 Beer Tracker Elite v2")
     
     with get_connection() as conn:
         query = """
-            SELECT 
-                t.id, 
-                t.name, 
-                t.is_admin, 
-                COUNT(DISTINCT SUBSTR(r.beer_key, 1, INSTR(r.beer_key, '-') - 1)) as session_count
+            SELECT t.id, t.name, t.is_admin, 
+                   COUNT(DISTINCT SUBSTR(m.beer_event_position, 1, INSTR(m.beer_event_position, '-') - 1)) as session_count
             FROM tasters t
             JOIN ratings r ON t.id = r.taster_id
+            JOIN beer_event_mapping m ON r.beer_key = m.beer_event_position
             GROUP BY t.id
             HAVING session_count > 0
             ORDER BY session_count DESC, t.name ASC
@@ -89,50 +93,41 @@ if st.session_state.current_taster is None:
     
     if st.button("Enter Journey", use_container_width=True, type="primary"):
         if selected_label:
-            original_name = selected_label.split(" (")[0]
             st.session_state.update({
-                'current_taster': original_name,
+                'current_taster': selected_label.split(" (")[0],
                 'taster_id': int(name_to_id_map[selected_label]),
                 'is_admin': bool(name_to_admin_map[selected_label]),
                 'current_tasting': latest_session
             })
-            update_benchmarks() # Calibrate points system on login
+            update_benchmarks()
             st.rerun()
-        else:
-            st.warning("Please select a name.")
     st.stop()
 
 # --- NAVIGATION SETUP (Logged In) ---
 st.set_page_config(page_title="Beer Tracker Elite", page_icon="🍺", layout="wide")
-st.image(os.path.join(BASE_DIR, "IN.jpg"), width=720)
+
+render_branded_header("IN.jpg")
 
 # Page Definitions
 pg_dash = st.Page("pages/dashboard.py", title="Dashboard", icon="🗺️", default=True)
 pg_rate = st.Page("pages/rate_beers.py", title="Rate Beers", icon="⭐")
 pg_lead = st.Page("pages/leaderboard.py", title="Leaderboard", icon="🏆")
-pg_hall = st.Page("pages/analytics.py", title="Hall of Fame", icon="📈") # The New Analytics Page
+pg_hall = st.Page("pages/analytics.py", title="Hall of Fame", icon="📈")
 pg_add  = st.Page("pages/add_beer.py", title="Add Beer", icon="📸")
 pg_admin = st.Page("pages/curation.py", title="Admin Curation", icon="🛠️")
 
-# Build navigation
-user_pages = [pg_dash, pg_rate, pg_lead, pg_hall]
-admin_pages = [pg_add, pg_admin]
-
+# Navigation Routing
 if st.session_state.is_admin:
-    pages_to_show = {"User": user_pages, "Admin": admin_pages}
+    pg = st.navigation({
+        "User": [pg_dash, pg_rate, pg_lead, pg_hall],
+        "Admin": [pg_add, pg_admin]
+    })
 else:
-    pages_to_show = user_pages
+    pg = st.navigation([pg_dash, pg_rate, pg_lead, pg_hall])
 
-pg = st.navigation(pages_to_show)
-
-# Sidebar Footer
+# Sidebar
 st.sidebar.divider()
 st.sidebar.caption(f"Logged in as: **{st.session_state.current_taster}**")
-
-if st.sidebar.button("Recalibrate Benchmarks"):
-    update_benchmarks()
-    st.toast("Club benchmarks updated based on current data!")
-
 if st.sidebar.button("Log Out"):
     st.session_state.current_taster = None
     st.rerun()
