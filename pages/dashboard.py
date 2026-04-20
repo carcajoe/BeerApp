@@ -5,7 +5,6 @@ import sqlite3
 import os
 
 # --- 1. CONFIGURATION ---
-# We go up one level because this file is inside /pages/
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_NAME = os.path.join(BASE_DIR, "beer_tracker.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
@@ -15,7 +14,7 @@ def get_connection():
     conn.execute("PRAGMA journal_mode=WAL;") 
     return conn
 
-# Security Check: Ensure user is logged in
+# Security Check
 if 'current_taster' not in st.session_state or st.session_state.current_taster is None:
     st.warning("Please log in on the main page.")
     st.stop()
@@ -26,23 +25,28 @@ st.title("🗺️ Global Beer Journey")
 with get_connection() as conn:
     query = """
     SELECT 
-        b.*, 
+        m.beer_event_position AS beer_id, 
+        b.beer_id AS internal_beer_id,   
+        b.beer_name_manual, b.beer_name_scraped, 
+        b.abv, b.untappd_score, b.brewver_score,
+        b.untappd_url, b.description,
         s.l1_type, s.l2_category, s.l3_substyle, 
-        br.brewery_name, br.group_name, br.city,
-        br.lat, br.lon,
-        c.country_name, c.continent, c.is_non_brewing,
-        e.tasting_no, e.date as event_date, e.location as event_location, e.title as event_title,
-        (SELECT COUNT(DISTINCT r2.taster_id) FROM ratings r2 WHERE r2.beer_key = b.beer_id) as participant_count,
+        br.brewery_name, br.city, br.lat, br.lon,
+        c.country_name, c.continent,
+        e.tasting_no, e.date as event_date, e.title as event_title,
+        m.position_in_session,
+        (SELECT COUNT(DISTINCT r2.taster_id) FROM ratings r2 WHERE r2.beer_key = m.beer_event_position) as participant_count,
         GROUP_CONCAT(DISTINCT t.name || ': ' || r.points_assigned) as taster_scores,
         GROUP_CONCAT(DISTINCT t.name) as taster_names
-    FROM beers b
+    FROM beer_event_mapping m
+    JOIN beers b ON m.beer_id = b.beer_id
     LEFT JOIN styles s ON b.style_id = s.id
     LEFT JOIN breweries br ON b.brewery_id = br.brewery_id
     LEFT JOIN countries c ON br.country_code = c.country_code
-    LEFT JOIN events e ON CAST(SUBSTR(b.beer_id, 1, INSTR(b.beer_id, '-') - 1) AS INTEGER) = e.tasting_no
-    LEFT JOIN ratings r ON b.beer_id = r.beer_key
+    LEFT JOIN events e ON m.tasting_no = e.tasting_no
+    LEFT JOIN ratings r ON m.beer_event_position = r.beer_key
     LEFT JOIN tasters t ON r.taster_id = t.id
-    GROUP BY b.beer_id
+    GROUP BY m.beer_event_position
     """
     df_raw = pd.read_sql(query, conn)
     tasters_list = pd.read_sql("SELECT name FROM tasters", conn)['name'].tolist()
@@ -83,13 +87,11 @@ if selected_country: df_filtered = df_filtered[df_filtered['country_name'].isin(
 if selected_taster:
     df_filtered = df_filtered[df_filtered['taster_names'].apply(lambda x: any(t in str(x).split(',') for t in selected_taster) if pd.notna(x) else False)]
 
-# Sorting logic
-df_filtered['session_num'] = df_filtered['beer_id'].str.split('-').str[0].astype(int)
-df_filtered['beer_num'] = df_filtered['beer_id'].str.split('-').str[1].astype(int)
-df_filtered = df_filtered.sort_values(['session_num', 'beer_num'], ascending=[False, False])
+# Sorting logic - Now using the clean integer columns we created
+df_filtered = df_filtered.sort_values(['tasting_no', 'position_in_session'], ascending=[False, False])
 
 # --- 6. TOP METRICS ---
-session_count = df_filtered[df_filtered['tasting_no'] != 0]['tasting_no'].nunique()
+session_count = df_filtered[df_filtered['tasting_no'].notna()]['tasting_no'].nunique()
 
 st.divider()
 m4, m1, m2 = st.columns(3)
@@ -97,7 +99,7 @@ m1.metric("Beers", len(df_filtered))
 m2.metric("Countries", df_filtered['country_name'].nunique())
 m4.metric("Sessions", session_count)
 
-# --- 7. MAP SECTION ---
+# --- 7. MAP SECTION (Your Original Styles) ---
 tasted_counts = df_filtered[df_filtered['country_name'].notna()].groupby('country_name').size().reset_index(name='beer_count')
 city_data = df_filtered[df_filtered['lat'].notna()].groupby(['city', 'lat', 'lon', 'country_name']).size().reset_index(name='city_beer_count')
 is_filtered = bool(selected_country or selected_event or selected_beers or selected_brewery or selected_style or selected_taster)

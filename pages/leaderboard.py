@@ -31,27 +31,30 @@ col_header.header(f"🏆 Session {curr_t} Results")
 if col_btn.button("🔄 Refresh Data"):
     st.rerun()
 
+# --- MODIFIED SQL: Joins mapping table and filters by integer tasting_no ---
 query = """
 SELECT 
-    b.beer_id, 
-    COALESCE(NULLIF(b.beer_name_scraped, ''), b.beer_name_manual, 'Beer ' || b.beer_id) as Beer,
+    m.beer_event_position AS beer_id, 
+    COALESCE(NULLIF(b.beer_name_scraped, ''), b.beer_name_manual, 'Beer ' || m.beer_event_position) as Beer,
     b.untappd_score,
     b.brewver_score,
     t.name as Taster,
     r.points_assigned as Points
 FROM beers b
-LEFT JOIN ratings r ON b.beer_id = r.beer_key
+JOIN beer_event_mapping m ON b.beer_id = m.beer_id
+LEFT JOIN ratings r ON m.beer_event_position = r.beer_key
 LEFT JOIN tasters t ON r.taster_id = t.id
-WHERE b.beer_id LIKE ?
+WHERE m.tasting_no = ?
 """
 
 with get_connection() as conn:
-    raw_df = pd.read_sql(query, conn, params=(f"{curr_t}-%",))
+    # --- MODIFIED PARAMS: Passes integer curr_t instead of LIKE string ---
+    raw_df = pd.read_sql(query, conn, params=(curr_t,))
 
 valid_df = raw_df.dropna(subset=['Points'])
 
 if not valid_df.empty:
-    # --- 3. TABLE LOGIC (TOP VISUAL) ---
+    # --- 3. TABLE LOGIC (STAYS THE SAME) ---
     st.markdown("### 📊 Final Rankings")
     
     table_df = valid_df.groupby('beer_id').agg({
@@ -96,7 +99,7 @@ if not valid_df.empty:
 
     st.divider()
 
-    # --- 4. CHART LOGIC (BOTTOM VISUAL) ---
+    # --- 4. CHART LOGIC (STAYS THE SAME) ---
     chart_data = valid_df.groupby(['Beer', 'Taster'])['Points'].sum().reset_index()
     rank_order = chart_data.groupby('Beer')['Points'].sum().sort_values(ascending=True).index.tolist()
     
@@ -110,16 +113,12 @@ if not valid_df.empty:
     
     fig.update_layout(
         barmode='stack', 
-        height=400 + (len(rank_order) * 35), # Slightly increased height for larger labels
+        height=400 + (len(rank_order) * 35),
         yaxis_title=None,
         xaxis_title="Total Points",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
 
-    # Styling the text inside the bars:
-    # 1. Middle anchor centers the text in the segment
-    # 2. Font size 24 (doubled from default ~12)
-    # 3. Color set to a dark grey (#444444) for readability on pastel
     fig.update_traces(
         texttemplate='%{text}', 
         textposition='inside',
