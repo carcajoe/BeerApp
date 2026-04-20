@@ -3,6 +3,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import os
+import base64
 from contextlib import contextmanager
 
 # --- CONFIG & PATHS ---
@@ -16,14 +17,19 @@ def get_connection():
     try: yield conn
     finally: conn.close()
 
-# --- DYNAMIC CALIBRATION ---
+# --- INITIALIZE SESSION STATE ---
+if 'current_taster' not in st.session_state:
+    st.session_state.update({
+        'current_taster': None,
+        'is_admin': False,
+        'taster_id': None,
+        'current_tasting': 1,
+        'benchmarks': None
+    })
+
 def update_benchmarks():
     with get_connection() as conn:
-        xp_df = pd.read_sql("""
-            SELECT taster_id, COUNT(DISTINCT SUBSTR(beer_key, 1, INSTR(beer_key, '-')-1)) as count 
-            FROM ratings GROUP BY taster_id
-        """, conn)
-        
+        xp_df = pd.read_sql("SELECT taster_id, COUNT(DISTINCT SUBSTR(beer_key, 1, INSTR(beer_key, '-')-1)) as count FROM ratings GROUP BY taster_id", conn)
         event_df = pd.read_sql("""
             SELECT 
                 SUBSTR(m.beer_event_position, 1, INSTR(m.beer_event_position, '-')-1) as eid,
@@ -43,72 +49,135 @@ def update_benchmarks():
         "quality": np.percentile(event_df['avg_quality'], [20, 80]) if not event_df.empty else [0.65, 0.82]
     }
 
-# --- INITIALIZE SESSION STATE ---
-if 'current_taster' not in st.session_state:
-    st.session_state.update({
-        'current_taster': None,
-        'is_admin': False,
-        'taster_id': None,
-        'current_tasting': 1,
-        'benchmarks': None
-    })
+def get_base64_img(path):
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except: return ""
 
-# --- REUSABLE HEADER FUNCTION ---
-def render_branded_header(image_name):
-    # Use 5 columns to create a narrower middle slot for the 720px image 
-    # to prevent it from looking "small" due to column stretching
-    _, _, col_mid, _, _ = st.columns([1, 1, 4, 1, 1])
-    with col_mid:
-        st.image(os.path.join(BASE_DIR, image_name), width=720)
+# --- THE "FORCE-CENTER" CSS ---
+def apply_layout_styles(max_width="720px", is_login=False):
+    css = f"""
+        <style>
+            /* Global Header Lock */
+            .header-container {{
+                width: 720px;
+                margin: 0 auto 10px auto;
+            }}
+            .header-container img {{
+                width: 720px !important;
+                border-radius: 10px;
+                display: block;
+            }}
 
-# --- LOGIN SCREEN ---
-if st.session_state.current_taster is None:
-    st.set_page_config(page_title="Beer Tracker Login", page_icon="🍺", layout="wide")
+            /* Standard Centering */
+            .block-container {{
+                max-width: {max_width} !important;
+                padding-top: 2rem !important;
+                margin-left: auto !important;
+                margin-right: auto !important;
+            }}
+
+            h1, h3 {{ text-align: center !important; }}
+            [data-testid="stWidgetLabel"] {{ text-align: center !important; width: 100%; display: block !important; }}
+    """
     
-    render_branded_header("OUT.jpg")
-    
-    st.title("🍻 Beer Tracker Elite v2")
-    
-    with get_connection() as conn:
-        query = """
-            SELECT t.id, t.name, t.is_admin, 
-                   COUNT(DISTINCT SUBSTR(m.beer_event_position, 1, INSTR(m.beer_event_position, '-') - 1)) as session_count
-            FROM tasters t
-            JOIN ratings r ON t.id = r.taster_id
-            JOIN beer_event_mapping m ON r.beer_key = m.beer_event_position
-            GROUP BY t.id
-            HAVING session_count > 0
-            ORDER BY session_count DESC, t.name ASC
+    if is_login:
+        css += """
+            /* NUCLEAR LOGIN CENTERING */
+            /* 1. Hide the sidebar physically */
+            [data-testid="stSidebar"] { display: none !important; }
+            
+            /* 2. Kill the left padding that Streamlit reserves for the sidebar */
+            [data-testid="stAppViewContainer"] { padding-left: 0 !important; }
+            
+            /* 3. Force the main section to center its contents */
+            section[data-testid="stMain"] { 
+                width: 100vw !important; 
+                margin-left: 0 !important; 
+                display: flex !important;
+                justify-content: center !important;
+            }
+
+            /* 4. Center the form inside the 720px container */
+            [data-testid="stForm"] {
+                width: 450px !important;
+                margin: 0 auto !important;
+            }
         """
-        tasters_df = pd.read_sql(query, conn)
-        last_ev = conn.execute("SELECT MAX(tasting_no) FROM events").fetchone()
-        latest_session = last_ev[0] if last_ev and last_ev[0] else 1
-    
-    st.markdown("### Who are you?")
-    taster_options = tasters_df.apply(lambda x: f"{x['name']} ({x['session_count']} sessions)", axis=1).tolist()
-    name_to_id_map = dict(zip(taster_options, tasters_df['id']))
-    name_to_admin_map = dict(zip(taster_options, tasters_df['is_admin']))
+    css += "</style>"
+    st.markdown(css, unsafe_allow_html=True)
 
-    selected_label = st.selectbox("Select your profile:", [""] + taster_options)
+# --- 1. LOGIN SCREEN (OUT) ---
+if st.session_state.current_taster is None:
+    st.set_page_config(page_title="Beer Vault Login", page_icon="🍺", layout="wide")
+    apply_layout_styles(max_width="720px", is_login=True) 
     
-    if st.button("Enter Journey", use_container_width=True, type="primary"):
-        if selected_label:
-            st.session_state.update({
-                'current_taster': selected_label.split(" (")[0],
-                'taster_id': int(name_to_id_map[selected_label]),
-                'is_admin': bool(name_to_admin_map[selected_label]),
-                'current_tasting': latest_session
-            })
-            update_benchmarks()
-            st.rerun()
+    # Render OUT.jpg
+    out_b64 = get_base64_img(os.path.join(BASE_DIR, "OUT.jpg"))
+    st.markdown(f'<div class="header-container"><img src="data:image/jpeg;base64,{out_b64}"></div>', unsafe_allow_html=True)
+    
+    st.markdown("<h1>🍺 Beer Vault Access</h1>", unsafe_allow_html=True)
+    
+    with st.form("login_gate"):
+        st.markdown("### Who are you?")
+        
+        with get_connection() as conn:
+            query = """
+                SELECT t.id, t.name, t.is_admin, 
+                       COUNT(DISTINCT SUBSTR(m.beer_event_position, 1, INSTR(m.beer_event_position, '-') - 1)) as sessions
+                FROM tasters t
+                JOIN ratings r ON t.id = r.taster_id
+                JOIN beer_event_mapping m ON r.beer_key = m.beer_event_position
+                WHERE t.active = 'Y'
+                GROUP BY t.id
+                ORDER BY sessions DESC, t.name ASC
+            """
+            tasters_df = pd.read_sql(query, conn)
+            last_ev = conn.execute("SELECT MAX(tasting_no) FROM events").fetchone()
+            latest_session = last_ev[0] if last_ev and last_ev[0] else 1
+        
+        taster_options = tasters_df.apply(lambda x: f"{x['name']} ({x['sessions']} sessions)", axis=1).tolist()
+        name_to_data = {row['name'] + f" ({row['sessions']} sessions)": row for _, row in tasters_df.iterrows()}
+
+        selected_label = st.selectbox("Select Profile", [""] + taster_options)
+        pwd_input = st.text_input("Access Key", type="password")
+        
+        if st.form_submit_button("Unlock & Enter Journey", use_container_width=True):
+            if selected_label and selected_label != "":
+                user_row = name_to_data[selected_label]
+                req_secret = "ADMIN_PASSWORD" if bool(user_row['is_admin']) else "USER_PASSWORD"
+                
+                if pwd_input == st.secrets[req_secret]:
+                    st.session_state.update({
+                        'current_taster': user_row['name'],
+                        'taster_id': int(user_row['id']),
+                        'is_admin': bool(user_row['is_admin']),
+                        'current_tasting': latest_session
+                    })
+                    update_benchmarks()
+                    st.rerun()
+                else:
+                    st.error("🚫 Invalid Key")
     st.stop()
 
-# --- NAVIGATION SETUP (Logged In) ---
+# --- 2. MAIN APP (IN) ---
 st.set_page_config(page_title="Beer Tracker Elite", page_icon="🍺", layout="wide")
+apply_layout_styles(max_width="1080px", is_login=False) 
 
-render_branded_header("IN.jpg")
+# SIDEBAR: THIS MUST BE DEFINED BEFORE PG.RUN() TO BE AT THE TOP
+with st.sidebar:
+    st.markdown(f"### 👤 {st.session_state.current_taster}")
+    if st.button("🚪 Log Out", use_container_width=True):
+        st.session_state.current_taster = None
+        st.rerun()
+    st.divider()
 
-# Page Definitions
+# Header Image
+in_b64 = get_base64_img(os.path.join(BASE_DIR, "IN.jpg"))
+st.markdown(f'<div class="header-container"><img src="data:image/jpeg;base64,{in_b64}"></div>', unsafe_allow_html=True)
+
+# Navigation
 pg_dash = st.Page("pages/dashboard.py", title="Dashboard", icon="🗺️", default=True)
 pg_rate = st.Page("pages/rate_beers.py", title="Rate Beers", icon="⭐")
 pg_lead = st.Page("pages/leaderboard.py", title="Leaderboard", icon="🏆")
@@ -116,7 +185,6 @@ pg_hall = st.Page("pages/analytics.py", title="Hall of Fame", icon="📈")
 pg_add  = st.Page("pages/add_beer.py", title="Add Beer", icon="📸")
 pg_admin = st.Page("pages/curation.py", title="Admin Curation", icon="🛠️")
 
-# Navigation Routing
 if st.session_state.is_admin:
     pg = st.navigation({
         "User": [pg_dash, pg_rate, pg_lead, pg_hall],
@@ -124,12 +192,5 @@ if st.session_state.is_admin:
     })
 else:
     pg = st.navigation([pg_dash, pg_rate, pg_lead, pg_hall])
-
-# Sidebar
-st.sidebar.divider()
-st.sidebar.caption(f"Logged in as: **{st.session_state.current_taster}**")
-if st.sidebar.button("Log Out"):
-    st.session_state.current_taster = None
-    st.rerun()
 
 pg.run()
