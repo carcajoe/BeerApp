@@ -184,7 +184,9 @@ def render_beer_card(medal, row, v_count, b_count, multiplier, m_details):
         # ROW 3: STYLE (L3) + Tooltip & ABV
         s_col1, s_col2 = st.columns([0.7, 0.3])
         with s_col1:
-            st.markdown(f"🍺 {row['style_name'] or 'Unknown'}", help=row['style_info'] or "No additional style info available.")
+            # FIX: Convert style_info to string to prevent TypeError on built-in operation (Streamlit help requires str)
+            h_info = str(row['style_info']) if pd.notna(row['style_info']) else "No additional style info available."
+            st.markdown(f"🍺 {row['style_name'] or 'Unknown'}", help=h_info)
         with s_col2:
             st.markdown(f"🧪 **{row['abv'] or '??'}%**")
             
