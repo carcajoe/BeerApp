@@ -42,19 +42,10 @@ def get_base64_img(path):
 
 # --- CLEAN SHEET RESPONSIVE LAYOUT ---
 def apply_layout_styles(is_login=False):
-    # Responsive container logic: 95% on mobile, max 720px on desktop
     css = """
     <style>
-        /* 1. Global Reset & Centering */
         .stApp { align-items: center; }
-        
-        .main-container {
-            width: 95%;
-            max-width: 720px;
-            margin: 0 auto;
-        }
-
-        /* 2. Responsive Image Lock */
+        .main-container { width: 95%; max-width: 720px; margin: 0 auto; }
         .responsive-img {
             width: 100%;
             max-width: 720px;
@@ -63,12 +54,8 @@ def apply_layout_styles(is_login=False):
             display: block;
             margin: 0 auto 20px auto;
         }
-
-        /* 3. Text & Widget Centering */
         h1, h2, h3, .stMarkdown { text-align: center !important; }
         [data-testid="stWidgetLabel"] { text-align: center !important; justify-content: center; }
-        
-        /* 4. Fix Sidebar Interference on Login */
     """
     if is_login:
         css += """
@@ -76,79 +63,89 @@ def apply_layout_styles(is_login=False):
             [data-testid="stAppViewContainer"] { padding-left: 0 !important; }
             section[data-testid="stMain"] { padding: 0 !important; }
         """
-    
     css += "</style>"
     st.markdown(css, unsafe_allow_html=True)
 
 # --- 1. LOGIN SCREEN (OUT) ---
 if st.session_state.current_taster is None:
-    st.set_page_config(page_title="Login", page_icon="🍺", layout="centered")
+    st.set_page_config(page_title="Beer Vault Login", page_icon="🍺", layout="centered")
     apply_layout_styles(is_login=True)
     
-    # Image Header
     out_b64 = get_base64_img(os.path.join(BASE_DIR, "OUT.jpg"))
     st.markdown(f'<img src="data:image/jpeg;base64,{out_b64}" class="responsive-img">', unsafe_allow_html=True)
-    
     st.markdown("<h1>Beer Vault Access</h1>", unsafe_allow_html=True)
     
-    # Use a container for the form to ensure CSS targeting works
-    with st.container():
-        with st.form("login_form", clear_on_submit=False):
-            with get_connection() as conn:
-                try:
-                    tasters_df = pd.read_sql("SELECT id, name, is_admin FROM tasters WHERE active = 'Y' ORDER BY name ASC", conn)
-                except:
-                    tasters_df = pd.DataFrame(columns=['id', 'name', 'is_admin'])
-            
-            user_list = tasters_df['name'].tolist()
-            selected_user = st.selectbox("Who are you?", [""] + user_list)
-            password = st.text_input("Access Key", type="password")
-            
-            if st.form_submit_button("Unlock & Enter", use_container_width=True):
-                if selected_user:
-                    user_data = tasters_df[tasters_df['name'] == selected_user].iloc[0]
-                    secret = "ADMIN_PASSWORD" if bool(user_data['is_admin']) else "USER_PASSWORD"
-                    
-                    if password == st.secrets[secret]:
-                        st.session_state.update({
-                            'current_taster': user_data['name'],
-                            'taster_id': int(user_data['id']),
-                            'is_admin': bool(user_data['is_admin'])
-                        })
-                        update_benchmarks()
-                        st.rerun()
-                    else:
-                        st.error("Invalid Key")
+    with st.form("login_form"):
+        st.markdown("### Who are you?")
+        with get_connection() as conn:
+            try:
+                # Restored the logic to order by session count
+                query = """
+                    SELECT t.id, t.name, t.is_admin, 
+                           COUNT(DISTINCT SUBSTR(m.beer_event_position, 1, INSTR(m.beer_event_position, '-') - 1)) as sessions
+                    FROM tasters t
+                    LEFT JOIN ratings r ON t.id = r.taster_id
+                    LEFT JOIN beer_event_mapping m ON r.beer_key = m.beer_event_position
+                    WHERE t.active = 'Y'
+                    GROUP BY t.id
+                    ORDER BY sessions DESC, t.name ASC
+                """
+                tasters_df = pd.read_sql(query, conn)
+                last_ev = conn.execute("SELECT MAX(tasting_no) FROM events").fetchone()
+                latest_session = last_ev[0] if last_ev and last_ev[0] else 1
+            except:
+                tasters_df = pd.DataFrame(columns=['id', 'name', 'is_admin', 'sessions'])
+                latest_session = 1
+        
+        # Format labels: "Name (X sessions)"
+        taster_options = tasters_df.apply(lambda x: f"{x['name']} ({int(x['sessions'])} sessions)", axis=1).tolist()
+        name_to_data = {f"{row['name']} ({int(row['sessions'])} sessions)": row for _, row in tasters_df.iterrows()}
+
+        selected_label = st.selectbox("Select your profile:", [""] + taster_options)
+        pwd_input = st.text_input("Access Key", type="password")
+        
+        if st.form_submit_button("Unlock & Enter Journey", use_container_width=True):
+            if selected_label and selected_label != "":
+                user_row = name_to_data[selected_label]
+                req_secret = "ADMIN_PASSWORD" if bool(user_row['is_admin']) else "USER_PASSWORD"
+                
+                if pwd_input == st.secrets[req_secret]:
+                    st.session_state.update({
+                        'current_taster': user_row['name'],
+                        'taster_id': int(user_row['id']),
+                        'is_admin': bool(user_row['is_admin']),
+                        'current_tasting': latest_session
+                    })
+                    update_benchmarks()
+                    st.rerun()
+                else:
+                    st.error("🚫 Invalid Key")
     st.stop()
 
 # --- 2. MAIN APP (IN) ---
-st.set_page_config(page_title="Beer Tracker", page_icon="🍺", layout="wide")
+st.set_page_config(page_title="Beer Tracker Elite", page_icon="🍺", layout="wide")
 apply_layout_styles(is_login=False)
 
-# Sidebar: User Info ALWAYS at the top
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state.current_taster}")
-    if st.button("Logout", use_container_width=True):
+    if st.button("🚪 Log Out", use_container_width=True):
         st.session_state.current_taster = None
         st.rerun()
     st.divider()
 
-# Header
 in_b64 = get_base64_img(os.path.join(BASE_DIR, "IN.jpg"))
 st.markdown(f'<div class="main-container"><img src="data:image/jpeg;base64,{in_b64}" class="responsive-img"></div>', unsafe_allow_html=True)
 
-# Navigation
-pages = [
-    st.Page("pages/dashboard.py", title="Dashboard", icon="🗺️", default=True),
-    st.Page("pages/rate_beers.py", title="Rate Beers", icon="⭐"),
-    st.Page("pages/leaderboard.py", title="Leaderboard", icon="🏆"),
-    st.Page("pages/analytics.py", title="Hall of Fame", icon="📈")
-]
+pg_dash = st.Page("pages/dashboard.py", title="Dashboard", icon="🗺️", default=True)
+pg_rate = st.Page("pages/rate_beers.py", title="Rate Beers", icon="⭐")
+pg_lead = st.Page("pages/leaderboard.py", title="Leaderboard", icon="🏆")
+pg_hall = st.Page("pages/analytics.py", title="Hall of Fame", icon="📈")
+pg_add  = st.Page("pages/add_beer.py", title="Add Beer", icon="📸")
+pg_admin = st.Page("pages/curation.py", title="Admin Curation", icon="🛠️")
 
 if st.session_state.is_admin:
-    pages.extend([
-        st.Page("pages/add_beer.py", title="Add Beer", icon="📸"),
-        st.Page("pages/curation.py", title="Admin Curation", icon="🛠️")
-    ])
+    pg = st.navigation({"User": [pg_dash, pg_rate, pg_lead, pg_hall], "Admin": [pg_add, pg_admin]})
+else:
+    pg = st.navigation([pg_dash, pg_rate, pg_lead, pg_hall])
 
-st.navigation(pages).run()
+pg.run()
