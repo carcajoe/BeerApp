@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import os
 import numpy as np
+import base64
 
 # --- 1. DATABASE & PATHS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -12,13 +13,21 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 def get_connection():
     return sqlite3.connect(DB_NAME, check_same_thread=False)
 
+def get_base64_img(path):
+    try:
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                return base64.b64encode(f.read()).decode()
+    except:
+        pass
+    return None
+
 # --- 2. DATA LOADING ---
 @st.cache_data(show_spinner="Mining all-time legends...")
 def load_analysis_data():
     with get_connection() as conn:
         ratings = pd.read_sql("SELECT taster_id, beer_key, points_assigned FROM ratings", conn)
         
-        # Joined brewery group, country name, style L3 name/desc, and beer description
         beers = pd.read_sql("""
             SELECT 
                 m.beer_event_position AS beer_id, 
@@ -34,6 +43,7 @@ def load_analysis_data():
                 c.country_name AS country, 
                 br.brewery_name,
                 br.group_name,
+                br.city,
                 m.tasting_no
             FROM beers b 
             JOIN beer_event_mapping m ON b.beer_id = m.beer_id
@@ -54,6 +64,7 @@ def load_analysis_data():
         
     return ratings, beers, tasters, events, mapping
 
+# Initialize Data
 ratings_raw, beers_df, tasters_df, events_df, mapping_df = load_analysis_data()
 
 # --- 3. THE ELITE SCALING ENGINE ---
@@ -103,7 +114,7 @@ toggles = {
     'xp': st.sidebar.checkbox("Taster Experience (XP)", value=True),
     'str': st.sidebar.checkbox("Session Strength", value=True),
     'part': st.sidebar.checkbox("Participation", value=True),
-    'qual': st.sidebar.checkbox("Global Quality", value=True)
+    'qual': st.sidebar.checkbox("Global Quality", value=False)
 }
 
 # --- 5. GLOBAL AGGREGATION ---
@@ -114,6 +125,8 @@ def get_all_time_top_20():
     else:
         v_ratings = ratings_raw
     
+    if v_ratings.empty: return pd.DataFrame()
+
     agg = v_ratings.groupby('beer_key')['points_assigned'].sum().reset_index()
     agg = agg.merge(beers_df, left_on='beer_key', right_on='beer_id')
     
@@ -144,61 +157,67 @@ def get_all_time_top_20():
         df = df.sort_values(by=["Elite Score", "Raw %", "Untappd"], ascending=False).head(20)
     return df
 
-# --- 6. RENDER TOP 20 ---
-st.title(f"📈 {selected_user} Analytics")
-with st.container(border=True):
-    st.subheader("⭐ All-Time Elite Top 20")
-    top_20_df = get_all_time_top_20()
-    st.dataframe(top_20_df, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# --- 7. SESSION GRID RENDERER ---
+# --- 6. SESSION GRID RENDERER ---
 def render_beer_card(medal, row, v_count, b_count, multiplier, m_details):
     available_points = v_count * b_count
     raw_pct = (row['total_points'] / available_points) * 100 if available_points > 0 else 0
     elite_score = scale_score(raw_pct, multiplier)
     
     hover_text = "Modifier Impact (Anchor: 75%):\n" + "\n".join([f"- {k}: {v}" for k, v in m_details.items()])
-    hover_text += f"\n\nSession Multiplier: {multiplier:.2f}x"
+
+    st.markdown("""
+        <style>
+        .beer-img-container {
+            height: 280px;
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #f0f2f6;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            overflow: hidden;
+        }
+        .beer-img-container img {
+            max-height: 280px;
+            width: auto;
+            object-fit: contain;
+        }
+        [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
+        [data-testid="stMetricLabel"] { font-size: 0.7rem !important; }
+        </style>
+    """, unsafe_allow_html=True)
 
     with st.container(border=True):
         st.markdown(f"#### {medal}") 
         
         img_path = os.path.join(UPLOAD_DIR, f"{row['beer_key']}.jpg")
-        if os.path.exists(img_path):
-            st.image(img_path, use_container_width=True)
-            st.markdown('<style>img { max-height: 280px; object-fit: contain; padding-bottom: 10px; }</style>', unsafe_allow_html=True)
+        b64 = get_base64_img(img_path)
+        
+        if b64:
+            st.markdown(f'<div class="beer-img-container"><img src="data:image/jpeg;base64,{b64}"></div>', unsafe_allow_html=True)
         else:
-            st.info("📷 No Photo")
+            st.markdown('<div class="beer-img-container"><p style="color:#a1a1a1;">📷 No Photo</p></div>', unsafe_allow_html=True)
 
         st.markdown(f"**{row['beer_name_scraped'] or row['beer_name_manual']}**")
         
-        # ROW 1: BREWERY (GROUP)
         group_txt = f" ({row['group_name']})" if row['group_name'] else ""
         st.markdown(f"🏭 **{row['brewery_name'] or 'Unknown'}{group_txt}**")
         
-        # ROW 2: COUNTRY
-        st.markdown(f"🌍 {row['country'] or 'Unknown'}")
+        city_txt = f"{row['city']} | " if pd.notna(row['city']) and str(row['city']).strip() != "" else ""
+        st.markdown(f"🌍 {city_txt}{row['country'] or 'Unknown'}")
         
-        # ROW 3: STYLE (L3) + Tooltip & ABV
         s_col1, s_col2 = st.columns([0.7, 0.3])
         with s_col1:
-            # FIX: Convert style_info to string to prevent TypeError on built-in operation (Streamlit help requires str)
-            h_info = str(row['style_info']) if pd.notna(row['style_info']) else "No additional style info available."
+            h_info = str(row['style_info']) if pd.notna(row['style_info']) else "No info."
             st.markdown(f"🍺 {row['style_name'] or 'Unknown'}", help=h_info)
         with s_col2:
             st.markdown(f"🧪 **{row['abv'] or '??'}%**")
             
-        # BEER INFO PANEL (Always displayed per request)
-        with st.expander("📝 Beer Info", expanded=False):
-            if row['beer_desc'] and str(row['beer_desc']).strip():
-                st.write(row['beer_desc'])
-            else:
-                st.caption("No description available for this beer.")
+        with st.expander("📝 Info", expanded=False):
+            st.write(row['beer_desc'] if pd.notna(row['beer_desc']) else "No description.")
         
         st.divider()
-        st.markdown(f"📊 **Score:** `{int(row['total_points'])} / {available_points}`")
         
         c1, c2 = st.columns(2)
         c1.metric("Raw %", f"{raw_pct:.1f}%")
@@ -211,7 +230,19 @@ def render_beer_card(medal, row, v_count, b_count, multiplier, m_details):
             help=hover_text
         )
 
-# --- 8. MAIN SESSION LOOP ---
+# --- 7. MAIN EXECUTION ---
+st.title(f"📈 {selected_user} Analytics")
+
+with st.container(border=True):
+    st.subheader("⭐ All-Time Elite Top 20")
+    top_20_df = get_all_time_top_20()
+    if not top_20_df.empty:
+        st.dataframe(top_20_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No ratings found.")
+
+st.divider()
+
 if selected_user != "All Tasters":
     target_uid = tasters_df[tasters_df['name'] == selected_user]['id'].values[0]
     active_ratings = ratings_raw[ratings_raw['taster_id'] == target_uid]
@@ -225,19 +256,39 @@ full_data = stats.merge(beers_df, left_on='beer_key', right_on='beer_id', how='i
 for _, event in events_df.iterrows():
     e_no = str(event['tasting_no'])
     s_ratings_all = ratings_raw[ratings_raw['beer_key'].astype(str).str.startswith(f"{e_no}-")]
-    voters = s_ratings_all['taster_id'].nunique()
+    
+    if s_ratings_all.empty:
+        continue
+
+    session_taster_ids = s_ratings_all['taster_id'].unique()
+    taster_names_list = sorted(tasters_df[tasters_df['id'].isin(session_taster_ids)]['name'].tolist())
+    tasters_str = ", ".join(taster_names_list)
+    
+    voters = len(session_taster_ids)
     row_map = mapping_df[mapping_df['tasting_no'] == int(e_no)]
     b_count = int(row_map['max_pos'].values[0]) if not row_map.empty else 0
     
     session_view = full_data[full_data['beer_key'].str.startswith(f"{e_no}-")].copy()
+    
     if not session_view.empty:
         m_details, m_final = get_detailed_multipliers(s_ratings_all, e_no, voters, b_count, toggles)
+        
         st.subheader(f"Session #{e_no}: {event['title']}")
+        st.markdown(
+            f"<p style='font-size: 0.95rem; color: #555; margin-top: -15px;'>"
+            f"🗓️ <b>{event['date']}</b> &nbsp; | &nbsp; "
+            f"🍺 <b>{b_count} Beers</b> &nbsp; | &nbsp; "
+            f"👥 <b>Tasters:</b> {tasters_str}"
+            f"</p>", 
+            unsafe_allow_html=True
+        )
         
         d_voters = 1 if selected_user != "All Tasters" else voters
+        
         session_view['elite_temp'] = session_view.apply(
             lambda x: scale_score((x['total_points'] / (d_voters * b_count)) * 100, m_final), axis=1
         )
+        
         top_3 = session_view.sort_values(['elite_temp', 'untappd_score'], ascending=False).head(3)
         
         cols = st.columns(3)
