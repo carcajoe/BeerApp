@@ -102,7 +102,7 @@ if st.session_state.current_taster is None:
         name_to_data = {f"{row['name']} ({int(row['sessions'])} sessions)": row for _, row in tasters_df.iterrows()}
 
         selected_label = st.selectbox("Select your profile:", [""] + taster_options)
-        pwd_input = st.text_input("Access Key", type="password")
+        pwd_input = st.text_input("Password", type="password")
         
         if st.form_submit_button("Unlock & Enter Journey", use_container_width=True):
             if selected_label and selected_label != "":
