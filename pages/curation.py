@@ -7,8 +7,6 @@ from lxml import html
 import re
 from contextlib import contextmanager
 import base64
-import socket
-from urllib.parse import urlparse
 
 # --- CONFIG & PATHS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,14 +23,16 @@ def get_connection():
     try: yield conn
     finally: conn.close()
 
-# --- DATA HELPERS ---
+# --- HELPERS ---
 
 def try_parse_int(value):
+    """Safely convert string to int or return None for SQL NULL."""
     if value is None: return None
     clean_val = re.sub(r'[^0-9]', '', str(value))
     return int(clean_val) if clean_val else None
 
 def try_parse_float(value):
+    """Safely convert string to float or return None for SQL NULL."""
     if value is None: return None
     clean_val = re.sub(r'[^0-9.]', '', str(value))
     try:
@@ -64,12 +64,12 @@ def parse_brewery_and_group(raw_name):
         return match.group(1).strip(), match.group(2).strip()
     return raw_name.strip(), None
 
-def download_beer_image(img_url, local_bid, proxies):
+def download_beer_image(img_url, local_bid):
     if not img_url: return False
-    if img_url.startswith('/'):
-        img_url = f"https://brewver.com{img_url}"
     try:
-        res = requests.get(img_url, proxies=proxies, stream=True, timeout=15)
+        if img_url.startswith('/'):
+            img_url = f"https://brewver.com{img_url}"
+        res = requests.get(img_url, stream=True, timeout=10)
         if res.status_code == 200:
             file_path = os.path.join(UPLOADS_DIR, f"{local_bid}.jpg")
             with open(file_path, 'wb') as f:
@@ -101,59 +101,38 @@ def get_or_create_brewery(name, group, city, state, country_code):
 # --- SCRAPER ---
 
 def scrape_brewver_data(url, local_bid):
-    proxy_str = st.secrets.get("HOME_PROXY_URL")
-    if not proxy_str:
-        st.error("HOME_PROXY_URL secret not configured!")
-        return None
-
-    # Handle DNS Resolution for asuscomm addresses
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        parsed = urlparse(proxy_str)
-        hostname = parsed.hostname
-        # Resolve the DDNS to current IP
-        ip_address = socket.gethostbyname(hostname)
-        # Rebuild the proxy string with the IP to avoid SOCKS errors
-        resolved_proxy = proxy_str.replace(hostname, ip_address)
-    except Exception as dns_err:
-        st.error(f"DDNS Resolution failed: {dns_err}")
-        return None
-
-    proxies = {
-        'http': resolved_proxy,
-        'https': resolved_proxy
-    }
-    
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'}
-    
-    try:
-        res = requests.get(url, headers=headers, proxies=proxies, timeout=20)
-        
-        if res.status_code != 200:
-            st.error(f"Home Bridge failed: Site returned {res.status_code}")
-            return None
-
+        res = requests.get(url, headers=headers, timeout=10)
         tree = html.fromstring(res.content)
         
+        # Identity & Description
         name = tree.xpath("//h3/text()")[0].strip() if tree.xpath("//h3/text()") else ""
         desc_nodes = tree.xpath("//div[contains(@class, 'description')]//text()")
         description = " ".join([t.strip() for t in desc_nodes if t.strip()]) if desc_nodes else ""
         
+        # Score
         score_node = tree.xpath("//div[contains(@class, 'statsbubble-text-large')]/text()")
         score = try_parse_float(score_node[0]) if score_node else None
 
+        # Fix for Ticks (Rating Count) - finding the bubble that contains the 'Ticks' label
         ticks_xpath = "//div[contains(@class, 'statsbubble')][.//div[contains(text(), 'Ticks')]]//div[contains(@class, 'statsbubble-text-small')]/text()"
         ticks_node = tree.xpath(ticks_xpath)
         rating_count = try_parse_int(ticks_node[0]) if ticks_node else None
 
+        # Reverting ABV & IBU to original table search logic
         abv_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'ABV')]/text()")
         abv_val = try_parse_float(abv_text[0]) if abv_text else None
+
         ibu_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'IBU')]/text()")
         ibu_val = try_parse_int(ibu_text[0]) if ibu_text else None
 
+        # Image Download
         img_src = tree.xpath("//img[contains(@class, 'beerimage')]/@src")
         if img_src:
-            download_beer_image(img_src[0], local_bid, proxies)
+            download_beer_image(img_src[0], local_bid)
 
+        # Brewery & Location
         raw_brewery = tree.xpath("//h4/a[1]/text()")[0].strip() if tree.xpath("//h4/a[1]/text()") else ""
         brewery_link_rel = tree.xpath("//h4/a[1]/@href")
         b_name, g_name = parse_brewery_and_group(raw_brewery)
@@ -161,7 +140,7 @@ def scrape_brewver_data(url, local_bid):
         city, state, country_name = "", "", ""
         if brewery_link_rel:
             try:
-                b_res = requests.get(f"https://brewver.com{brewery_link_rel[0]}", headers=headers, proxies=proxies, timeout=10)
+                b_res = requests.get(f"https://brewver.com{brewery_link_rel[0]}", headers=headers, timeout=5)
                 b_tree = html.fromstring(b_res.content)
                 loc_links = b_tree.xpath("//h4/a/text()")
                 if len(loc_links) >= 3:
@@ -176,11 +155,12 @@ def scrape_brewver_data(url, local_bid):
             "count": rating_count, "desc": description, "brewery_id": brew_id, "country": country_name
         }
     except Exception as e:
-        st.error(f"Home Bridge connection error: {e}")
+        st.error(f"Scraper error: {e}")
         return None
 
-# --- UI (Standard Admin Curation) ---
-st.header("🛠️ Admin Curation (Asus DDNS Bridge)")
+# --- UI ---
+
+st.header("🛠️ Admin Curation")
 
 with get_connection() as conn:
     events = pd.read_sql("SELECT tasting_no, theme FROM events ORDER BY tasting_no DESC", conn)
