@@ -5,3 +5,4 @@ pillow
 pd
 lxml
 requests
+requests[socks]
