@@ -7,6 +7,7 @@ from lxml import html
 import re
 from contextlib import contextmanager
 import base64
+from urllib.parse import quote
 
 # --- CONFIG & PATHS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -64,12 +65,18 @@ def parse_brewery_and_group(raw_name):
 
 def download_beer_image(img_url, local_bid):
     if not img_url: return False
-    # Headers added here too in case image server blocks bots
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    # If using proxy for the page, we usually need it for the image too if hosted on same domain
+    api_key = st.secrets.get("SCRAPER_API_KEY")
+    if img_url.startswith('/'):
+        img_url = f"https://brewver.com{img_url}"
+    
     try:
-        if img_url.startswith('/'):
-            img_url = f"https://brewver.com{img_url}"
-        res = requests.get(img_url, headers=headers, stream=True, timeout=10)
+        if api_key:
+            proxy_url = f"http://api.scraperapi.com?api_key={api_key}&url={quote(img_url)}"
+            res = requests.get(proxy_url, stream=True, timeout=20)
+        else:
+            res = requests.get(img_url, stream=True, timeout=10)
+            
         if res.status_code == 200:
             file_path = os.path.join(UPLOADS_DIR, f"{local_bid}.jpg")
             with open(file_path, 'wb') as f:
@@ -101,61 +108,52 @@ def get_or_create_brewery(name, group, city, state, country_code):
 # --- SCRAPER ---
 
 def scrape_brewver_data(url, local_bid):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-GB,en;q=0.9,en-US;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'max-age=0',
-        'Sec-Ch-Ua': '"Not A(Baby Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"macOS"',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Upgrade-Insecure-Requests': '1'
-    }
+    api_key = st.secrets.get("SCRAPER_API_KEY")
+    
+    if not api_key:
+        st.error("Missing SCRAPER_API_KEY in Streamlit Secrets!")
+        return None
+
+    # ScraperAPI handles headers/rotation for us
+    proxy_url = f"http://api.scraperapi.com?api_key={api_key}&url={quote(url)}"
     
     try:
-        # LOGGING for Streamlit Cloud Debugging
-        print(f"DEBUG: Attempting to scrape URL: {url}")
-        res = requests.get(url, headers=headers, timeout=10)
-        print(f"DEBUG: Response Status Code: {res.status_code}")
+        print(f"DEBUG: Proxying request for URL: {url}")
+        res = requests.get(proxy_url, timeout=30)
+        print(f"DEBUG: Proxy Status Code: {res.status_code}")
 
         if res.status_code != 200:
-            st.error(f"Scrape failed. Site returned Status Code: {res.status_code}")
+            st.error(f"Proxy failed (Code {res.status_code}). Check API credits or URL.")
             return None
 
         tree = html.fromstring(res.content)
         
-        # Identity & Description
+        # 1. Identity & Description
         name = tree.xpath("//h3/text()")[0].strip() if tree.xpath("//h3/text()") else ""
         desc_nodes = tree.xpath("//div[contains(@class, 'description')]//text()")
         description = " ".join([t.strip() for t in desc_nodes if t.strip()]) if desc_nodes else ""
         
-        # Score
+        # 2. Score & Ticks (Rating Count)
         score_node = tree.xpath("//div[contains(@class, 'statsbubble-text-large')]/text()")
         score = try_parse_float(score_node[0]) if score_node else None
 
-        # Ticks (Rating Count) - Relative XPath to catch the 105 or 8 correctly
         ticks_xpath = "//div[contains(@class, 'statsbubble')][.//div[contains(text(), 'Ticks')]]//div[contains(@class, 'statsbubble-text-small')]/text()"
         ticks_node = tree.xpath(ticks_xpath)
         rating_count = try_parse_int(ticks_node[0]) if ticks_node else None
 
-        # ABV & IBU (Original Table Logic)
+        # 3. ABV & IBU
         abv_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'ABV')]/text()")
         abv_val = try_parse_float(abv_text[0]) if abv_text else None
 
         ibu_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'IBU')]/text()")
         ibu_val = try_parse_int(ibu_text[0]) if ibu_text else None
 
-        # Image Download
+        # 4. Image
         img_src = tree.xpath("//img[contains(@class, 'beerimage')]/@src")
         if img_src:
             download_beer_image(img_src[0], local_bid)
 
-        # Brewery & Location
+        # 5. Brewery
         raw_brewery = tree.xpath("//h4/a[1]/text()")[0].strip() if tree.xpath("//h4/a[1]/text()") else ""
         brewery_link_rel = tree.xpath("//h4/a[1]/@href")
         b_name, g_name = parse_brewery_and_group(raw_brewery)
@@ -163,13 +161,15 @@ def scrape_brewver_data(url, local_bid):
         city, state, country_name = "", "", ""
         if brewery_link_rel:
             try:
-                b_res = requests.get(f"https://brewver.com{brewery_link_rel[0]}", headers=headers, timeout=5)
+                b_url = f"https://brewver.com{brewery_link_rel[0]}"
+                b_proxy_url = f"http://api.scraperapi.com?api_key={api_key}&url={quote(b_url)}"
+                b_res = requests.get(b_proxy_url, timeout=20)
                 b_tree = html.fromstring(b_res.content)
                 loc_links = b_tree.xpath("//h4/a/text()")
                 if len(loc_links) >= 3:
                     city, state, country_name = [l.strip() for l in loc_links[:3]]
             except Exception as b_err:
-                print(f"DEBUG: Brewery fetch error: {b_err}")
+                print(f"DEBUG: Brewery proxy error: {b_err}")
 
         country_cd = get_country_code(country_name or state)
         brew_id = get_or_create_brewery(b_name, g_name, city, state, country_cd)
@@ -179,11 +179,11 @@ def scrape_brewver_data(url, local_bid):
             "count": rating_count, "desc": description, "brewery_id": brew_id, "country": country_name
         }
     except Exception as e:
-        print(f"DEBUG: Scraper Exception: {str(e)}")
+        print(f"DEBUG: Proxy Scraper Exception: {str(e)}")
         st.error(f"Scraper error: {e}")
         return None
 
-# --- UI ---
+# --- UI (Rest remains unchanged) ---
 
 st.header("🛠️ Admin Curation")
 
