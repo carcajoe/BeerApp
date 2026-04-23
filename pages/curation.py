@@ -26,13 +26,11 @@ def get_connection():
 # --- HELPERS ---
 
 def try_parse_int(value):
-    """Safely convert string to int or return None for SQL NULL."""
     if value is None: return None
     clean_val = re.sub(r'[^0-9]', '', str(value))
     return int(clean_val) if clean_val else None
 
 def try_parse_float(value):
-    """Safely convert string to float or return None for SQL NULL."""
     if value is None: return None
     clean_val = re.sub(r'[^0-9.]', '', str(value))
     try:
@@ -66,10 +64,12 @@ def parse_brewery_and_group(raw_name):
 
 def download_beer_image(img_url, local_bid):
     if not img_url: return False
+    # Headers added here too in case image server blocks bots
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
         if img_url.startswith('/'):
             img_url = f"https://brewver.com{img_url}"
-        res = requests.get(img_url, stream=True, timeout=10)
+        res = requests.get(img_url, headers=headers, stream=True, timeout=10)
         if res.status_code == 200:
             file_path = os.path.join(UPLOADS_DIR, f"{local_bid}.jpg")
             with open(file_path, 'wb') as f:
@@ -101,9 +101,24 @@ def get_or_create_brewery(name, group, city, state, country_code):
 # --- SCRAPER ---
 
 def scrape_brewver_data(url, local_bid):
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    # Enhanced browser-like headers
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://brewver.com/',
+        'DNT': '1'
+    }
     try:
+        # LOGGING for Streamlit Cloud Debugging
+        print(f"DEBUG: Attempting to scrape URL: {url}")
         res = requests.get(url, headers=headers, timeout=10)
+        print(f"DEBUG: Response Status Code: {res.status_code}")
+
+        if res.status_code != 200:
+            st.error(f"Scrape failed. Site returned Status Code: {res.status_code}")
+            return None
+
         tree = html.fromstring(res.content)
         
         # Identity & Description
@@ -115,12 +130,12 @@ def scrape_brewver_data(url, local_bid):
         score_node = tree.xpath("//div[contains(@class, 'statsbubble-text-large')]/text()")
         score = try_parse_float(score_node[0]) if score_node else None
 
-        # Fix for Ticks (Rating Count) - finding the bubble that contains the 'Ticks' label
+        # Ticks (Rating Count) - Relative XPath to catch the 105 or 8 correctly
         ticks_xpath = "//div[contains(@class, 'statsbubble')][.//div[contains(text(), 'Ticks')]]//div[contains(@class, 'statsbubble-text-small')]/text()"
         ticks_node = tree.xpath(ticks_xpath)
         rating_count = try_parse_int(ticks_node[0]) if ticks_node else None
 
-        # Reverting ABV & IBU to original table search logic
+        # ABV & IBU (Original Table Logic)
         abv_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'ABV')]/text()")
         abv_val = try_parse_float(abv_text[0]) if abv_text else None
 
@@ -145,7 +160,8 @@ def scrape_brewver_data(url, local_bid):
                 loc_links = b_tree.xpath("//h4/a/text()")
                 if len(loc_links) >= 3:
                     city, state, country_name = [l.strip() for l in loc_links[:3]]
-            except: pass
+            except Exception as b_err:
+                print(f"DEBUG: Brewery fetch error: {b_err}")
 
         country_cd = get_country_code(country_name or state)
         brew_id = get_or_create_brewery(b_name, g_name, city, state, country_cd)
@@ -155,6 +171,7 @@ def scrape_brewver_data(url, local_bid):
             "count": rating_count, "desc": description, "brewery_id": brew_id, "country": country_name
         }
     except Exception as e:
+        print(f"DEBUG: Scraper Exception: {str(e)}")
         st.error(f"Scraper error: {e}")
         return None
 
