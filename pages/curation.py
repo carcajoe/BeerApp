@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import base64
 import subprocess
 import time
+import socket
 
 # --- CONFIG & PATHS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,18 +29,35 @@ def get_connection():
 # --- TOR & NETWORK HELPERS ---
 
 def ensure_tor_running():
-    """Starts the Tor service on the Streamlit Cloud container if not listening."""
+    """Starts Tor and waits until the SOCKS port is actually ready."""
+    # Check if already running
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        if s.connect_ex(('127.0.0.1', 9050)) == 0:
+            return True
+
     try:
-        # Check if port 9050 is open (NC is usually available on Debian)
-        res = subprocess.run(["nc", "-z", "127.0.0.1", "9050"], capture_output=True)
-        if res.returncode != 0:
-            print("Starting Tor service...")
-            subprocess.Popen(["tor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(5) # Circuit building time
+        # Start Tor in the background
+        subprocess.Popen(["tor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Wait up to 30 seconds for the port to open
+        status_text = st.empty()
+        for i in range(30):
+            status_text.info(f"Initializing Onion Routing... ({i}s)")
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(('127.0.0.1', 9050)) == 0:
+                    status_text.empty()
+                    time.sleep(2) # Pad for circuit stability
+                    return True
+            time.sleep(1)
+            
+        st.error("Tor failed to start. Check if 'tor' is in packages.txt")
+        return False
     except Exception as e:
-        print(f"Tor Start Error: {e}")
+        st.error(f"Failed to launch Tor service: {e}")
+        return False
 
 def get_tor_proxies():
+    # 'socks5h' ensures DNS resolution also happens over Tor
     return {
         'http': 'socks5h://127.0.0.1:9050',
         'https': 'socks5h://127.0.0.1:9050'
@@ -121,43 +139,49 @@ def get_or_create_brewery(name, group, city, state, country_code):
 # --- SCRAPER ---
 
 def scrape_brewver_data(url, local_bid):
-    ensure_tor_running()
+    if not ensure_tor_running():
+        return None
+        
     proxies = get_tor_proxies()
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0'}
     
     try:
         print(f"DEBUG: Tor-scraping {url}")
-        res = requests.get(url, headers=headers, proxies=proxies, timeout=30)
-        print(f"DEBUG: Status {res.status_code}")
-
+        res = requests.get(url, headers=headers, proxies=proxies, timeout=35)
+        
         if res.status_code != 200:
-            st.error(f"Tor Scrape Failed: {res.status_code}")
+            st.error(f"Tor Scrape Failed: {res.status_code}. The Exit Node might be blocked. Try again.")
             return None
 
         tree = html.fromstring(res.content)
         
+        # Identity & Description
         name = tree.xpath("//h3/text()")[0].strip() if tree.xpath("//h3/text()") else ""
         desc_nodes = tree.xpath("//div[contains(@class, 'description')]//text()")
         description = " ".join([t.strip() for t in desc_nodes if t.strip()]) if desc_nodes else ""
         
+        # Score
         score_node = tree.xpath("//div[contains(@class, 'statsbubble-text-large')]/text()")
         score = try_parse_float(score_node[0]) if score_node else None
 
-        # Fixed XPath for Ticks
+        # Ticks (Rating Count) - Robust logic for the '105' issue
         ticks_xpath = "//div[contains(@class, 'statsbubble')][.//div[contains(text(), 'Ticks')]]//div[contains(@class, 'statsbubble-text-small')]/text()"
         ticks_node = tree.xpath(ticks_xpath)
         rating_count = try_parse_int(ticks_node[0]) if ticks_node else None
 
+        # ABV & IBU (Table Data)
         abv_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'ABV')]/text()")
         abv_val = try_parse_float(abv_text[0]) if abv_text else None
 
         ibu_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'IBU')]/text()")
         ibu_val = try_parse_int(ibu_text[0]) if ibu_text else None
 
+        # Image Download via Tor
         img_src = tree.xpath("//img[contains(@class, 'beerimage')]/@src")
         if img_src:
             download_beer_image(img_src[0], local_bid, proxies)
 
+        # Brewery & Location
         raw_brewery = tree.xpath("//h4/a[1]/text()")[0].strip() if tree.xpath("//h4/a[1]/text()") else ""
         brewery_link_rel = tree.xpath("//h4/a[1]/@href")
         b_name, g_name = parse_brewery_and_group(raw_brewery)
@@ -185,7 +209,7 @@ def scrape_brewver_data(url, local_bid):
 
 # --- UI ---
 
-st.header("🛠️ Admin Curation (Tor Proxy)")
+st.header("🛠️ Admin Curation (Tor Routing)")
 
 with get_connection() as conn:
     events = pd.read_sql("SELECT tasting_no, theme FROM events ORDER BY tasting_no DESC", conn)
