@@ -4,3 +4,4 @@ plotly
 pillow
 pd
 lxml
+requests
