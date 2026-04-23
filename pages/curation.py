@@ -30,23 +30,20 @@ def get_connection():
 
 def ensure_tor_running():
     """Starts Tor and waits until the SOCKS port is actually ready."""
-    # Check if already running
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         if s.connect_ex(('127.0.0.1', 9050)) == 0:
             return True
 
     try:
-        # Start Tor in the background
         subprocess.Popen(["tor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        # Wait up to 30 seconds for the port to open
         status_text = st.empty()
         for i in range(30):
             status_text.info(f"Initializing Onion Routing... ({i}s)")
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 if s.connect_ex(('127.0.0.1', 9050)) == 0:
                     status_text.empty()
-                    time.sleep(2) # Pad for circuit stability
+                    time.sleep(2) 
                     return True
             time.sleep(1)
             
@@ -57,7 +54,6 @@ def ensure_tor_running():
         return False
 
 def get_tor_proxies():
-    # 'socks5h' ensures DNS resolution also happens over Tor
     return {
         'http': 'socks5h://127.0.0.1:9050',
         'https': 'socks5h://127.0.0.1:9050'
@@ -145,67 +141,76 @@ def scrape_brewver_data(url, local_bid):
     proxies = get_tor_proxies()
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0'}
     
-    try:
-        print(f"DEBUG: Tor-scraping {url}")
-        res = requests.get(url, headers=headers, proxies=proxies, timeout=35)
-        
-        if res.status_code != 200:
-            st.error(f"Tor Scrape Failed: {res.status_code}. The Exit Node might be blocked. Try again.")
-            return None
+    # Retry logic for blocked exit nodes
+    for attempt in range(3):
+        try:
+            print(f"DEBUG: Attempt {attempt+1} scraping {url}")
+            res = requests.get(url, headers=headers, proxies=proxies, timeout=35)
+            
+            if res.status_code == 403:
+                st.warning(f"Attempt {attempt+1}: IP blocked. Retrying in 5s...")
+                time.sleep(5)
+                continue
+                
+            if res.status_code != 200:
+                st.error(f"Scrape Failed: {res.status_code}")
+                return None
 
-        tree = html.fromstring(res.content)
-        
-        # Identity & Description
-        name = tree.xpath("//h3/text()")[0].strip() if tree.xpath("//h3/text()") else ""
-        desc_nodes = tree.xpath("//div[contains(@class, 'description')]//text()")
-        description = " ".join([t.strip() for t in desc_nodes if t.strip()]) if desc_nodes else ""
-        
-        # Score
-        score_node = tree.xpath("//div[contains(@class, 'statsbubble-text-large')]/text()")
-        score = try_parse_float(score_node[0]) if score_node else None
+            tree = html.fromstring(res.content)
+            
+            # Identity & Description
+            name = tree.xpath("//h3/text()")[0].strip() if tree.xpath("//h3/text()") else ""
+            desc_nodes = tree.xpath("//div[contains(@class, 'description')]//text()")
+            description = " ".join([t.strip() for t in desc_nodes if t.strip()]) if desc_nodes else ""
+            
+            # Score
+            score_node = tree.xpath("//div[contains(@class, 'statsbubble-text-large')]/text()")
+            score = try_parse_float(score_node[0]) if score_node else None
 
-        # Ticks (Rating Count) - Robust logic for the '105' issue
-        ticks_xpath = "//div[contains(@class, 'statsbubble')][.//div[contains(text(), 'Ticks')]]//div[contains(@class, 'statsbubble-text-small')]/text()"
-        ticks_node = tree.xpath(ticks_xpath)
-        rating_count = try_parse_int(ticks_node[0]) if ticks_node else None
+            # Ticks (Rating Count)
+            ticks_xpath = "//div[contains(@class, 'statsbubble')][.//div[contains(text(), 'Ticks')]]//div[contains(@class, 'statsbubble-text-small')]/text()"
+            ticks_node = tree.xpath(ticks_xpath)
+            rating_count = try_parse_int(ticks_node[0]) if ticks_node else None
 
-        # ABV & IBU (Table Data)
-        abv_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'ABV')]/text()")
-        abv_val = try_parse_float(abv_text[0]) if abv_text else None
+            # ABV & IBU (Original Table Logic)
+            abv_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'ABV')]/text()")
+            abv_val = try_parse_float(abv_text[0]) if abv_text else None
 
-        ibu_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'IBU')]/text()")
-        ibu_val = try_parse_int(ibu_text[0]) if ibu_text else None
+            ibu_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'IBU')]/text()")
+            ibu_val = try_parse_int(ibu_text[0]) if ibu_text else None
 
-        # Image Download via Tor
-        img_src = tree.xpath("//img[contains(@class, 'beerimage')]/@src")
-        if img_src:
-            download_beer_image(img_src[0], local_bid, proxies)
+            # Image
+            img_src = tree.xpath("//img[contains(@class, 'beerimage')]/@src")
+            if img_src:
+                download_beer_image(img_src[0], local_bid, proxies)
 
-        # Brewery & Location
-        raw_brewery = tree.xpath("//h4/a[1]/text()")[0].strip() if tree.xpath("//h4/a[1]/text()") else ""
-        brewery_link_rel = tree.xpath("//h4/a[1]/@href")
-        b_name, g_name = parse_brewery_and_group(raw_brewery)
-        
-        city, state, country_name = "", "", ""
-        if brewery_link_rel:
-            try:
-                b_res = requests.get(f"https://brewver.com{brewery_link_rel[0]}", headers=headers, proxies=proxies, timeout=15)
-                b_tree = html.fromstring(b_res.content)
-                loc_links = b_tree.xpath("//h4/a/text()")
-                if len(loc_links) >= 3:
-                    city, state, country_name = [l.strip() for l in loc_links[:3]]
-            except: pass
+            # Brewery & Location
+            raw_brewery = tree.xpath("//h4/a[1]/text()")[0].strip() if tree.xpath("//h4/a[1]/text()") else ""
+            brewery_link_rel = tree.xpath("//h4/a[1]/@href")
+            b_name, g_name = parse_brewery_and_group(raw_brewery)
+            
+            city, state, country_name = "", "", ""
+            if brewery_link_rel:
+                try:
+                    b_res = requests.get(f"https://brewver.com{brewery_link_rel[0]}", headers=headers, proxies=proxies, timeout=15)
+                    b_tree = html.fromstring(b_res.content)
+                    loc_links = b_tree.xpath("//h4/a/text()")
+                    if len(loc_links) >= 3:
+                        city, state, country_name = [l.strip() for l in loc_links[:3]]
+                except: pass
 
-        country_cd = get_country_code(country_name or state)
-        brew_id = get_or_create_brewery(b_name, g_name, city, state, country_cd)
+            country_cd = get_country_code(country_name or state)
+            brew_id = get_or_create_brewery(b_name, g_name, city, state, country_code=country_cd)
 
-        return {
-            "name": name, "abv": abv_val, "ibu": ibu_val, "score": score, 
-            "count": rating_count, "desc": description, "brewery_id": brew_id, "country": country_name
-        }
-    except Exception as e:
-        st.error(f"Scraper error: {e}")
-        return None
+            return {
+                "name": name, "abv": abv_val, "ibu": ibu_val, "score": score, 
+                "count": rating_count, "desc": description, "brewery_id": brew_id, "country": country_name
+            }
+        except Exception as e:
+            st.error(f"Scraper error on attempt {attempt+1}: {e}")
+            time.sleep(2)
+            
+    return None
 
 # --- UI ---
 
