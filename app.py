@@ -79,7 +79,7 @@ if st.session_state.current_taster is None:
         st.markdown("### Who are you?")
         with get_connection() as conn:
             try:
-                # Restored the logic to order by session count
+                # Query keeps logic to order by session count[cite: 3]
                 query = """
                     SELECT t.id, t.name, t.is_admin, 
                            COUNT(DISTINCT SUBSTR(m.beer_event_position, 1, INSTR(m.beer_event_position, '-') - 1)) as sessions
@@ -97,9 +97,9 @@ if st.session_state.current_taster is None:
                 tasters_df = pd.DataFrame(columns=['id', 'name', 'is_admin', 'sessions'])
                 latest_session = 1
         
-        # Format labels: "Name (X sessions)"
-        taster_options = tasters_df.apply(lambda x: f"{x['name']} ({int(x['sessions'])} sessions)", axis=1).tolist()
-        name_to_data = {f"{row['name']} ({int(row['sessions'])} sessions)": row for _, row in tasters_df.iterrows()}
+        # Display only Name, but maintains order from tasters_df[cite: 3]
+        taster_options = tasters_df['name'].tolist() if not tasters_df.empty else []
+        name_to_data = {row['name']: row for _, row in tasters_df.iterrows()}
 
         selected_label = st.selectbox("Select your profile:", [""] + taster_options)
         pwd_input = st.text_input("Password", type="password")
