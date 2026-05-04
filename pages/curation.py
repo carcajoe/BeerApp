@@ -2,11 +2,14 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import io
 import requests
 from lxml import html
 import re
 from contextlib import contextmanager
 import base64
+from PIL import Image
+from streamlit_cropper import st_cropper # Ensure this is in requirements.txt
 
 # --- CONFIG & PATHS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,14 +28,20 @@ def get_connection():
 
 # --- HELPERS ---
 
+def compress_image(image_obj):
+    """Consistent optimizer with add_beer.py[cite: 1]"""
+    if image_obj.mode in ("RGBA", "P"): 
+        image_obj = image_obj.convert("RGB")
+    buffer = io.BytesIO()
+    image_obj.save(buffer, format="JPEG", quality=70, optimize=True)
+    return buffer.getvalue()
+
 def try_parse_int(value):
-    """Safely convert string to int or return None for SQL NULL."""
     if value is None: return None
     clean_val = re.sub(r'[^0-9]', '', str(value))
     return int(clean_val) if clean_val else None
 
 def try_parse_float(value):
-    """Safely convert string to float or return None for SQL NULL."""
     if value is None: return None
     clean_val = re.sub(r'[^0-9.]', '', str(value))
     try:
@@ -65,6 +74,7 @@ def parse_brewery_and_group(raw_name):
     return raw_name.strip(), None
 
 def download_beer_image(img_url, local_bid):
+    """Legacy downloader for direct Brewver image saves."""
     if not img_url: return False
     try:
         if img_url.startswith('/'):
@@ -106,33 +116,27 @@ def scrape_brewver_data(url, local_bid):
         res = requests.get(url, headers=headers, timeout=10)
         tree = html.fromstring(res.content)
         
-        # Identity & Description
         name = tree.xpath("//h3/text()")[0].strip() if tree.xpath("//h3/text()") else ""
         desc_nodes = tree.xpath("//div[contains(@class, 'description')]//text()")
         description = " ".join([t.strip() for t in desc_nodes if t.strip()]) if desc_nodes else ""
         
-        # Score
         score_node = tree.xpath("//div[contains(@class, 'statsbubble-text-large')]/text()")
         score = try_parse_float(score_node[0]) if score_node else None
 
-        # Fix for Ticks (Rating Count) - finding the bubble that contains the 'Ticks' label
         ticks_xpath = "//div[contains(@class, 'statsbubble')][.//div[contains(text(), 'Ticks')]]//div[contains(@class, 'statsbubble-text-small')]/text()"
         ticks_node = tree.xpath(ticks_xpath)
         rating_count = try_parse_int(ticks_node[0]) if ticks_node else None
 
-        # Reverting ABV & IBU to original table search logic
         abv_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'ABV')]/text()")
         abv_val = try_parse_float(abv_text[0]) if abv_text else None
 
         ibu_text = tree.xpath("//table[contains(@class, 'beerdata_table')]//td[contains(text(), 'IBU')]/text()")
         ibu_val = try_parse_int(ibu_text[0]) if ibu_text else None
 
-        # Image Download
         img_src = tree.xpath("//img[contains(@class, 'beerimage')]/@src")
         if img_src:
             download_beer_image(img_src[0], local_bid)
 
-        # Brewery & Location
         raw_brewery = tree.xpath("//h4/a[1]/text()")[0].strip() if tree.xpath("//h4/a[1]/text()") else ""
         brewery_link_rel = tree.xpath("//h4/a[1]/@href")
         b_name, g_name = parse_brewery_and_group(raw_brewery)
@@ -162,14 +166,15 @@ def scrape_brewver_data(url, local_bid):
 
 st.header("🛠️ Admin Curation")
 
+# 1. FETCH DATA FOR SELECTORS
 with get_connection() as conn:
-    events = pd.read_sql("SELECT tasting_no, theme FROM events ORDER BY tasting_no DESC", conn)
+    events_df = pd.read_sql("SELECT tasting_no, theme FROM events ORDER BY tasting_no DESC", conn)
     styles = pd.read_sql("SELECT id, l3_substyle FROM styles", conn)
     breweries = pd.read_sql("SELECT brewery_id, brewery_name FROM breweries ORDER BY brewery_name", conn)
 
-if not events.empty:
-    ev_list = [f"#{row['tasting_no']} {row['theme']}" for _, row in events.iterrows()]
-    sel_ev = st.selectbox("Session", ev_list)
+if not events_df.empty:
+    ev_list = [f"#{row['tasting_no']} {row['theme']}" for _, row in events_df.iterrows()]
+    sel_ev = st.selectbox("Session", ev_list, index=0)
     ev_no = int(sel_ev.split(" ")[0].replace("#", ""))
 
     with get_connection() as conn:
@@ -177,13 +182,40 @@ if not events.empty:
             SELECT b.*, m.beer_event_position as pos 
             FROM beers b 
             JOIN beer_event_mapping m ON b.beer_id = m.beer_id 
-            WHERE m.beer_event_position LIKE ? ORDER BY m.beer_event_position ASC
-        """, conn, params=(f"{ev_no}-%",))
+            WHERE m.tasting_no = ? ORDER BY m.position_in_session ASC
+        """, conn, params=(ev_no,))
 
     for _, beer in beers.iterrows():
         bid = beer['beer_id']
-        with st.expander(f"🍺 {beer['beer_name_scraped'] or beer['beer_name_manual'] or 'New'} ({beer['pos']})"):
+        b_pos = beer['pos']
+        
+        with st.expander(f"🍺 {beer['beer_name_manual'] or beer['beer_name_scraped'] or 'New'} ({b_pos})"):
             
+            # --- IMAGE REPLACEMENT & CROP ---
+            img_c1, img_c2 = st.columns([1, 2])
+            img_path = os.path.join(UPLOADS_DIR, f"{b_pos}.jpg")
+            
+            with img_c1:
+                b64 = get_base64_img(img_path)
+                if b64: st.markdown(f'<img src="data:image/jpeg;base64,{b64}" width="100%">', unsafe_allow_html=True)
+                else: st.warning("No Image")
+
+            with img_c2:
+                new_file = st.file_uploader("Upload New Label", type=['jpg', 'png', 'jpeg'], key=f"up_{bid}")
+                if new_file:
+                    img_obj = Image.open(new_file)
+                    # Force 1:1 Aspect Ratio for clean UI
+                    cropped = st_cropper(img_obj, realtime_update=True, aspect_ratio=(1, 1), key=f"crop_{bid}")
+                    if st.button("Save Cropped Image", key=f"sc_{bid}"):
+                        img_bytes = compress_image(cropped)
+                        with open(img_path, "wb") as f:
+                            f.write(img_bytes)
+                        st.success("Image Updated")
+                        st.rerun()
+
+            st.divider()
+
+            # --- DATA EDITING ---
             url = st.text_input("Brewver URL", value=beer['brewver_url'] or "", key=f"u{bid}")
             if st.button("Scrape Data", key=f"btn_{bid}"):
                 data = scrape_brewver_data(url, bid)
@@ -194,31 +226,24 @@ if not events.empty:
             with st.form(key=f"f{bid}"):
                 sd = st.session_state.get(f"temp_{bid}", {})
                 
-                c1, c2 = st.columns([1, 4])
-                with c1:
-                    img_path = os.path.join(UPLOADS_DIR, f"{bid}.jpg")
-                    b64 = get_base64_img(img_path)
-                    if b64: st.markdown(f'<img src="data:image/jpeg;base64,{b64}" width="100%">', unsafe_allow_html=True)
+                m_name = st.text_input("Manual Name", value=beer['beer_name_manual'] or "")
+                s_name = st.text_input("Scraped Name", value=sd.get('name', beer['beer_name_scraped'] or ""))
                 
-                with c2:
-                    m_name = st.text_input("Manual Name", value=beer['beer_name_manual'] or "")
-                    s_name = st.text_input("Scraped Name", value=sd.get('name', beer['beer_name_scraped'] or ""))
-                    
-                    col_s, col_b = st.columns(2)
-                    cur_style_idx = styles[styles['id'] == beer['style_id']].index[0] if beer['style_id'] in styles['id'].values else 0
-                    f_style = col_s.selectbox("Style", styles['l3_substyle'].tolist(), index=int(cur_style_idx))
-                    
-                    cur_brew_id = sd.get('brewery_id', beer['brewery_id'])
-                    cur_brew_idx = breweries[breweries['brewery_id'] == cur_brew_id].index[0] if cur_brew_id in breweries['brewery_id'].values else 0
-                    f_brewery = col_b.selectbox("Brewery", breweries['brewery_name'].tolist(), index=int(cur_brew_idx))
+                c_s, c_b = st.columns(2)
+                cur_style_idx = styles[styles['id'] == beer['style_id']].index[0] if beer['style_id'] in styles['id'].values else 0
+                f_style = c_s.selectbox("Style", styles['l3_substyle'].tolist(), index=int(cur_style_idx))
+                
+                cur_brew_id = sd.get('brewery_id', beer['brewery_id'])
+                cur_brew_idx = breweries[breweries['brewery_id'] == cur_brew_id].index[0] if cur_brew_id in breweries['brewery_id'].values else 0
+                f_brewery = c_b.selectbox("Brewery", breweries['brewery_name'].tolist(), index=int(cur_brew_idx))
 
-                    v1, v2, v3, v4 = st.columns(4)
-                    f_abv = v1.number_input("ABV", value=float(sd.get('abv') if sd.get('abv') is not None else (beer['abv'] or 0.0)))
-                    f_ibu = v2.number_input("IBU", value=int(sd.get('ibu') if sd.get('ibu') is not None else (beer['ibu'] or 0)))
-                    f_brv = v3.number_input("Score", value=float(sd.get('score') if sd.get('score') is not None else (beer['brewver_score'] or 0.0)))
-                    f_rat = v4.number_input("Ratings", value=int(sd.get('count') if sd.get('count') is not None else (beer['rating_count'] or 0)))
-                    
-                    f_desc = st.text_area("Description", value=sd.get('desc', beer['description'] or ""))
+                v1, v2, v3, v4 = st.columns(4)
+                f_abv = v1.number_input("ABV", value=float(sd.get('abv') if sd.get('abv') is not None else (beer['abv'] or 0.0)))
+                f_ibu = v2.number_input("IBU", value=int(sd.get('ibu') if sd.get('ibu') is not None else (beer['ibu'] or 0)))
+                f_brv = v3.number_input("Score", value=float(sd.get('score') if sd.get('score') is not None else (beer['brewver_score'] or 0.0)))
+                f_rat = v4.number_input("Ratings", value=int(sd.get('count') if sd.get('count') is not None else (beer['rating_count'] or 0)))
+                
+                f_desc = st.text_area("Description", value=sd.get('desc', beer['description'] or ""))
 
                 if st.form_submit_button("Save"):
                     sid = styles[styles['l3_substyle'] == f_style]['id'].iloc[0]
